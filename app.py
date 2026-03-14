@@ -5,7 +5,11 @@ import random
 
 # --- 1. ページ設定 & 接続 ---
 st.set_page_config(page_title="社労士合格V2 - 進捗完全同期版", layout="centered")
-conn = st.connection("supabase", type=SupabaseConnection)
+# 接続部分をこのように書き換えてみてください
+try:
+    conn = st.connection("supabase", type=SupabaseConnection)
+except Exception as e:
+    st.error(f"接続設定エラー: secrets.tomlを確認してください。 {e}")
 
 # --- 2. クラウド同期ロジック ---
 def load_all_progress(uid):
