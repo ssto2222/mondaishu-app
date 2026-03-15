@@ -57,7 +57,6 @@ def generate_ai_questions(category):
     prompt=f"""
 社労士試験の{category}の○×問題を5問作成
 JSON形式
-
 [
  {{
   "question":"",
@@ -68,12 +67,22 @@ JSON形式
 ]
 """
 
-    res = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role":"user","content":prompt}
-        ]
-    )
+    try:
+
+        res = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role":"user","content":prompt}
+            ]
+        )
+
+    except Exception as e:
+
+        st.error("AI生成エラー")
+        st.write("OpenAI制限またはAPIキー問題の可能性")
+        st.code(str(e))
+
+        return
 
     data=json.loads(res.choices[0].message.content)
 
@@ -92,7 +101,7 @@ JSON形式
 
         }).execute()
 
-
+    st.success("問題を追加しました")
 # =============================
 # AI解説
 # =============================
