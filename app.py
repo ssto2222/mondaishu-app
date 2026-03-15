@@ -52,36 +52,32 @@ if "last_ans" not in st.session_state:
     st.session_state.last_ans = ""
 if "db_synced" not in st.session_state:
     st.session_state.db_synced = False
+if "all_progress" not in st.session_state:
+    st.session_state.all_progress = {} # 全科目の進捗保存用
 
 # =========================
-# DB同期関数 (苦手リスト + 進捗再開)
+# DB同期関数
 # =========================
 def sync_with_supabase(user_id, category):
-    """DBからデータを取得。データがなくてもエラーにせず正常終了させる"""
     if user_id and not st.session_state.db_synced:
         try:
-            # 1. 苦手問題の同期
+            # 苦手問題の同期
             res_wrong = supabase.table("wrong_questions").select("question_id").eq("user_id", user_id).execute()
-            # データが空でも res_wrong.data は [] を返すので安全
             st.session_state.wrong_ids = {item["question_id"] for item in res_wrong.data}
             
-            # 2. 進捗（インデックス）の同期
-            res_prog = supabase.table("user_progress").select("last_index").eq("user_id", user_id).eq("category", category).execute()
+            # 全科目の進捗を一括取得 (ダッシュボード用)
+            res_all_prog = supabase.table("user_progress").select("category, last_index").eq("user_id", user_id).execute()
+            prog_map = {item["category"]: item["last_index"] for item in res_all_prog.data}
+            st.session_state.all_progress = prog_map
             
-            # 初回接続時（データがない時）は 0 のままにする
-            if res_prog.data and len(res_prog.data) > 0:
-                st.session_state.index = res_prog.data[0]["last_index"]
-            else:
-                st.session_state.index = 0
+            # 現在の科目のインデックス設定
+            st.session_state.index = prog_map.get(category, 0)
             
             st.session_state.db_synced = True
         except Exception as e:
-            # エラーの詳細を表示（本番では st.log などに流すのが理想）
-            st.error(f"同期エラー詳細: {e}") 
-            st.warning("初回設定またはネットワークエラーです。このまま学習を始められます。")
+            st.warning(f"同期中ですが、初回またはオフラインです。")
 
 def save_progress_to_db(user_id, category, index):
-    """現在の進捗をDBに保存する"""
     if user_id:
         try:
             supabase.table("user_progress").upsert({
@@ -89,6 +85,8 @@ def save_progress_to_db(user_id, category, index):
                 "category": category,
                 "last_index": index
             }).execute()
+            # セッション内の全科目進捗データも更新
+            st.session_state.all_progress[category] = index
         except:
             pass
 
@@ -97,7 +95,7 @@ def save_progress_to_db(user_id, category, index):
 # =========================
 with st.sidebar:
     st.title("📊 学習設定")
-    user_id = st.text_input("ユーザーID (保存に必要)", placeholder="例: yamada_01")
+    user_id = st.text_input("ユーザーID", placeholder="例: yamada_01")
     
     category_list = sorted(list(questions_dict.keys()))
     if not category_list:
@@ -106,11 +104,9 @@ with st.sidebar:
         
     category = st.selectbox("科目を選択", category_list)
 
-    # 科目が変わったら同期フラグをリセット
     if category != st.session_state.current_category:
         st.session_state.current_category = category
-        st.session_state.db_synced = False # 新しい科目で同期し直す
-        st.session_state.index = 0
+        st.session_state.db_synced = False
         st.session_state.answered = False
         if user_id:
             sync_with_supabase(user_id, category)
@@ -120,9 +116,41 @@ with st.sidebar:
         sync_with_supabase(user_id, category)
 
     mode = st.radio("モード切替", ["通常学習", "苦手克服 🔥"])
+
+    # =========================
+    # ダッシュボード表示
+    # =========================
+    st.divider()
+    st.subheader("🏆 総合ダッシュボード")
     
-    if user_id:
-        st.success(f"同期中: {user_id}")
+    total_q_all = 0
+    done_q_all = 0
+    
+    for cat, qs in questions_dict.items():
+        q_count = len(qs)
+        last_idx = st.session_state.all_progress.get(cat, 0)
+        # 現在解いている科目の場合はセッションのインデックスを優先
+        if cat == st.session_state.current_category:
+            last_idx = st.session_state.index
+            
+        total_q_all += q_count
+        done_q_all += min(last_idx, q_count) # 完了数は問題数を超えない
+
+    if total_q_all > 0:
+        total_rate = done_q_all / total_q_all
+        st.metric("トータル進捗率", f"{int(total_rate * 100)}%", f"{done_q_all}/{total_q_all} 問")
+        st.progress(total_rate)
+    
+    with st.expander("詳細な進捗を表示"):
+        for cat, qs in questions_dict.items():
+            q_count = len(qs)
+            last_idx = st.session_state.all_progress.get(cat, 0)
+            if cat == st.session_state.current_category:
+                last_idx = st.session_state.index
+            
+            rate = min(last_idx / q_count, 1.0) if q_count > 0 else 0
+            st.write(f"**{cat}** ({int(rate*100)}%)")
+            st.progress(rate)
 
 # =========================
 # 問題抽出
@@ -141,7 +169,6 @@ if not target:
         st.info("対象の問題がありません。")
     st.stop()
 
-# インデックスが範囲外にならないよう調整（苦手克服で問題が減った時用）
 if st.session_state.index >= len(target):
     st.session_state.index = 0
 
@@ -152,8 +179,11 @@ q = target[st.session_state.index]
 # =========================
 st.title(f"📖 {category}")
 st.caption(f"ID: {q['id']} | {mode}")
-st.progress(min((st.session_state.index + 1) / len(target), 1.0))
-st.write(f"**Q{st.session_state.index + 1} / {len(target)}**")
+
+prog_val = min((st.session_state.index + 1) / len(target), 1.0)
+st.progress(prog_val)
+st.write(f"**Question {st.session_state.index + 1}** / {len(target)} ({int(prog_val*100)}%)")
+
 st.markdown(f"### {q['q']}")
 
 col1, col2 = st.columns(2)
@@ -198,15 +228,6 @@ if st.session_state.answered:
         st.session_state.index += 1
         st.session_state.answered = False
         st.session_state.last_ans = ""
-        # 進捗をDBに保存
-        if mode == "通常学習": # 苦手モードは件数が変動するため通常時のみ記録
+        if mode == "通常学習":
             save_progress_to_db(user_id, category, st.session_state.index)
         st.rerun()
-
-# =========================
-# ステータス表示
-# =========================
-st.divider()
-total_subject_questions = len(all_target)
-current_wrong_count = len([qid for qid in st.session_state.wrong_ids if any(item['id'] == qid for item in all_target)])
-st.write(f"この科目の苦手問題: `{current_wrong_count} / {total_subject_questions}`")
