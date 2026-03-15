@@ -1,302 +1,175 @@
-from openai import OpenAI
-
 import streamlit as st
-from supabase import create_client
-import openai
-import random
-from collections import Counter
 import json
+import glob
+import os
+from supabase import create_client
 
+st.set_page_config(page_title="社労士合格アプリ")
 
-client = OpenAI(
-    api_key=st.secrets["OPENAI_API_KEY"]
-)
-
-st.set_page_config(page_title="社労士AI学習")
-
-# =============================
-# Secretsから設定取得
-# =============================
-
+# =========================
+# Supabase接続
+# =========================
+# secrets.tomlに設定が必要
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-openai.api_key = st.secrets["OPENAI_API_KEY"]
+# =========================
+# 問題読み込み (JSONファイルを検索)
+# =========================
+@st.cache_data
+def load_all_questions():
+    """
+    カレントディレクトリ内の .json ファイルを検索し、
+    { "ファイル名": [問題データ], ... } の辞書を作成する
+    """
+    all_data = {}
+    # カレントディレクトリ内のjsonファイルを取得
+    json_files = glob.glob("*.json")
+    
+    for file_path in json_files:
+        # ファイル名を科目名として使用 (例: "07_国民年金法.json" -> "07_国民年金法")
+        subject_name = os.path.splitext(os.path.basename(file_path))[0]
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                questions = json.load(f)
+                if isinstance(questions, list):
+                    all_data[subject_name] = questions
+        except Exception as e:
+            st.error(f"ファイルの読み込みに失敗しました: {file_path} ({e})")
+            
+    return all_data
 
-# =============================
-# DBから問題取得
-# =============================
+questions_dict = load_all_questions()
 
-def load_questions(category):
-
-    try:
-
-        res = supabase.table("questions") \
-            .select("*") \
-            .eq("category", category) \
-            .execute()
-
-        return res.data
-
-    except Exception as e:
-
-        st.error("Supabaseエラー")
-        st.code(str(e))
-
-        return []
-
-
-# =============================
-# AI問題生成
-# =============================
-
-def generate_ai_questions(category):
-
-    prompt=f"""
-社労士試験の{category}の○×問題を5問作成
-JSON形式
-[
- {{
-  "question":"",
-  "answer":"○",
-  "explanation":"",
-  "topic":""
- }}
-]
-"""
-
-    try:
-
-        res = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role":"user","content":prompt}
-            ]
-        )
-
-    except Exception as e:
-
-        st.error("AI生成エラー")
-        st.write("OpenAI制限またはAPIキー問題の可能性")
-        st.code(str(e))
-
-        return
-
-    data=json.loads(res.choices[0].message.content)
-
-    for q in data:
-
-        supabase.table("questions").insert({
-
-            "id":random.randint(1000000,9999999),
-            "category":category,
-            "type":"ox",
-            "question":q["question"],
-            "answer":q["answer"],
-            "explanation":q["explanation"],
-            "topic":q["topic"],
-            "difficulty":2
-
-        }).execute()
-
-    st.success("問題を追加しました")
-# =============================
-# AI解説
-# =============================
-
-def ai_explain(text):
-
-    prompt=f"""
-次の社労士問題を分かりやすく解説
-
-{text}
-"""
-
-    res=openai.ChatCompletion.create(
-        model="gpt-4o-mini",
-        messages=[{"role":"user","content":prompt}]
-    )
-
-    return res.choices[0].message.content
-
-
-# =============================
-# セッション
-# =============================
-
+# =========================
+# セッション状態の初期化
+# =========================
 if "index" not in st.session_state:
-    st.session_state.index=0
+    st.session_state.index = 0
 
-if "correct" not in st.session_state:
-    st.session_state.correct=0
+if "answered" not in st.session_state:
+    st.session_state.answered = False
 
-if "total" not in st.session_state:
-    st.session_state.total=0
+if "wrong_ids" not in st.session_state:
+    # 科目ごとに苦手問題を管理する場合は辞書にする
+    st.session_state.wrong_ids = set()
 
-if "topics" not in st.session_state:
-    st.session_state.topics=[]
+if "current_category" not in st.session_state:
+    st.session_state.current_category = ""
 
-
-# =============================
+# =========================
 # サイドバー
-# =============================
-
+# =========================
 with st.sidebar:
+    st.title("設定")
+    user_id = st.text_input("ユーザーID")
 
-    user_id=st.text_input("ユーザーID")
+    # JSONファイルから取得した科目名一覧を選択肢にする
+    category_list = sorted(list(questions_dict.keys()))
+    category = st.selectbox("科目", category_list)
 
-    categories=[
-    "01_労働基準法",
-    "02_労働安全衛生法",
-    "03_労災保険法",
-    "04_雇用保険法",
-    "05_労働保険徴収法",
-    "06_健康保険法",
-    "07_国民年金法",
-    "08_厚生年金保険法",
-    "09_労一",
-    "10_社一"
-    ]
+    # 科目が変更されたらインデックスをリセット
+    if category != st.session_state.current_category:
+        st.session_state.current_category = category
+        st.session_state.index = 0
+        st.session_state.answered = False
 
-    category=st.selectbox("科目",categories)
+    mode = st.radio("モード", ["通常", "苦手克服"])
 
-    mode=st.radio("モード",["通常","苦手"])
+# =========================
+# 問題取得処理
+# =========================
+target = questions_dict.get(category, [])
 
-    if st.button("AI問題生成"):
+if mode == "苦手克服":
+    # session_state.wrong_ids に含まれるIDの問題のみ抽出
+    target = [q for q in target if q["id"] in st.session_state.wrong_ids]
 
-        generate_ai_questions(category)
-
-        st.success("問題追加")
-
-
-# =============================
-# 問題ロード
-# =============================
-
-questions=load_questions(category)
-
-if mode=="苦手":
-
-    wrong=supabase.table("wrong_questions")\
-        .select("question_id")\
-        .eq("user_id",user_id)\
-        .execute()
-
-    ids=[w["question_id"] for w in wrong.data]
-
-    questions=[q for q in questions if q["id"] in ids]
-
-
-if not questions:
-
-    st.info("問題がありません")
-
+if not target:
+    st.info("対象となる問題がありません（苦手克服モードの場合は正解するとリストから消えます）")
     st.stop()
 
+# インデックスが範囲外にならないよう調整
+if st.session_state.index >= len(target):
+    st.session_state.index = 0
 
-random.shuffle(questions)
+q = target[st.session_state.index]
 
-q=questions[st.session_state.index]
-
-# =============================
-# 問題表示
-# =============================
-
+# =========================
+# メイン画面表示
+# =========================
 st.title(category)
+st.subheader(f"問題 {st.session_state.index + 1} / {len(target)}")
 
-st.subheader(q["question"])
+st.write(q["q"])
 
-user_ans=None
+# 回答用ボタン
+col1, col2 = st.columns(2)
+user_ans = None
 
-col1,col2=st.columns(2)
+with col1:
+    if st.button("○", use_container_width=True, disabled=st.session_state.answered):
+        user_ans = "○"
+        st.session_state.answered = True
 
-if col1.button("○"):
-    user_ans="○"
+with col2:
+    if st.button("×", use_container_width=True, disabled=st.session_state.answered):
+        user_ans = "×"
+        st.session_state.answered = True
 
-if col2.button("×"):
-    user_ans="×"
+# =========================
+# 回答判定・解説表示
+# =========================
+if st.session_state.answered:
+    # 直前のクリックで代入されたuser_ansがNoneの場合は、セッション等から判定を保持する必要があるため
+    # ここではボタンが押された瞬間の判定ロジックを工夫
+    
+    # 判定ロジックをボタン押下時に完結させるために一時変数を利用
+    if "last_ans" not in st.session_state:
+        st.session_state.last_ans = ""
+    
+    if user_ans:
+        st.session_state.last_ans = user_ans
 
-
-# =============================
-# 回答
-# =============================
-
-if st.button("回答"):
-
-    st.session_state.total+=1
-
-    if user_ans==q["answer"]:
-
-        st.success("正解")
-
-        st.session_state.correct+=1
-
+    # 正解・不正解の判定
+    if st.session_state.last_ans == q["a"]:
+        st.success("正解！")
+        if q["id"] in st.session_state.wrong_ids:
+            st.session_state.wrong_ids.remove(q["id"])
     else:
+        st.error(f"不正解... 正解は {q['a']} です。")
+        st.session_state.wrong_ids.add(q["id"])
+        
+        # Supabaseへの保存
+        if user_id:
+            try:
+                supabase.table("wrong_questions").insert({
+                    "user_id": user_id,
+                    "question_id": q["id"],
+                    "category": category  # どの科目の問題かも保存
+                }).execute()
+            except Exception as e:
+                pass # エラー時はサイレントにスルー
 
-        st.error(f"不正解 正解:{q['answer']}")
+    # 解説表示
+    with st.expander("解説を見る", expanded=True):
+        st.info(q["tips"])
 
-        supabase.table("wrong_questions").insert({
-        "user_id":user_id,
-        "question_id":q["id"]
-        }).execute()
-
-
-    st.info(q["explanation"])
-
-    st.session_state.topics.append(q["topic"])
-
-    with st.expander("AI解説"):
-
-        st.write(ai_explain(q["question"]))
-
-
-    if st.button("次へ"):
-
-        st.session_state.index+=1
-
-        supabase.table("study_log").insert({
-
-        "user_id":user_id,
-        "question_id":q["id"],
-        "result":user_ans
-
-        }).execute()
-
+    # 次へボタン
+    if st.button("次の問題へ"):
+        st.session_state.index += 1
+        st.session_state.answered = False
+        st.session_state.last_ans = ""
         st.rerun()
 
-
-# =============================
-# 弱点分析
-# =============================
-
+# =========================
+# 進捗管理
+# =========================
 st.divider()
+st.write(f"この科目の苦手問題数: {len([q for q in questions_dict[category] if q['id'] in st.session_state.wrong_ids])}")
 
-st.subheader("弱点")
-
-if st.session_state.topics:
-
-    counter=Counter(st.session_state.topics)
-
-    st.write(counter.most_common(5))
-
-
-# =============================
-# 合格率予測
-# =============================
-
-if st.session_state.total>0:
-
-    rate=st.session_state.correct/st.session_state.total
-
-    st.metric("正答率",f"{rate*100:.1f}%")
-
-    if rate>0.7:
-        st.success("合格圏")
-
-    elif rate>0.6:
-        st.warning("ボーダー")
-
-    else:
-        st.error("要強化")
+# プログレスバー
+if len(target) > 0:
+    progress_val = (st.session_state.index) / len(target)
+    st.progress(min(progress_val + (1/len(target) if st.session_state.answered else 0), 1.0))
