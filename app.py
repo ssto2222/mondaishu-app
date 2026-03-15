@@ -2,9 +2,11 @@ import streamlit as st
 import json
 import glob
 import os
+import pandas as pd
+from datetime import datetime, timedelta
 from supabase import create_client
 
-st.set_page_config(page_title="社労士合格アプリ", layout="centered")
+st.set_page_config(page_title="社労士合格アプリ Pro", layout="wide")
 
 # =========================
 # Supabase接続
@@ -14,7 +16,7 @@ try:
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 except Exception as e:
-    st.error("Supabaseの接続設定が見つかりません。Secretsを確認してください。")
+    st.error("Supabase設定エラー。Secretsを確認してください。")
     st.stop()
 
 # =========================
@@ -29,205 +31,136 @@ def load_all_questions():
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 questions = json.load(f)
-                if isinstance(questions, list):
-                    all_data[subject_name] = questions
-        except Exception as e:
-            st.error(f"読み込み失敗: {file_path} ({e})")
+                if isinstance(questions, list): all_data[subject_name] = questions
+        except: pass
     return all_data
 
 questions_dict = load_all_questions()
 
 # =========================
-# セッション状態の初期化
+# セッション状態
 # =========================
-if "index" not in st.session_state:
-    st.session_state.index = 0
-if "answered" not in st.session_state:
-    st.session_state.answered = False
-if "wrong_ids" not in st.session_state:
-    st.session_state.wrong_ids = set()
-if "current_category" not in st.session_state:
-    st.session_state.current_category = ""
-if "last_ans" not in st.session_state:
-    st.session_state.last_ans = ""
-if "db_synced" not in st.session_state:
-    st.session_state.db_synced = False
-if "all_progress" not in st.session_state:
-    st.session_state.all_progress = {} # 全科目の進捗保存用
+for key in ["index", "answered", "last_ans", "current_category", "db_synced"]:
+    if key not in st.session_state: st.session_state[key] = 0 if key == "index" else (False if "synced" in key or "answered" in key else "")
+
+if "wrong_ids" not in st.session_state: st.session_state.wrong_ids = set()
+if "all_progress" not in st.session_state: st.session_state.all_progress = {}
 
 # =========================
-# DB同期関数
+# 学習ログ記録関数 (グラフ用)
 # =========================
-def sync_with_supabase(user_id, category):
-    if user_id and not st.session_state.db_synced:
-        try:
-            # 苦手問題の同期
-            res_wrong = supabase.table("wrong_questions").select("question_id").eq("user_id", user_id).execute()
-            st.session_state.wrong_ids = {item["question_id"] for item in res_wrong.data}
-            
-            # 全科目の進捗を一括取得 (ダッシュボード用)
-            res_all_prog = supabase.table("user_progress").select("category, last_index").eq("user_id", user_id).execute()
-            prog_map = {item["category"]: item["last_index"] for item in res_all_prog.data}
-            st.session_state.all_progress = prog_map
-            
-            # 現在の科目のインデックス設定
-            st.session_state.index = prog_map.get(category, 0)
-            
-            st.session_state.db_synced = True
-        except Exception as e:
-            st.warning(f"同期中ですが、初回またはオフラインです。")
-
-def save_progress_to_db(user_id, category, index):
+def log_study_count(user_id):
     if user_id:
         try:
-            supabase.table("user_progress").upsert({
-                "user_id": user_id,
-                "category": category,
-                "last_index": index
-            }).execute()
-            # セッション内の全科目進捗データも更新
-            st.session_state.all_progress[category] = index
-        except:
-            pass
+            today = datetime.now().date().isoformat()
+            # 既存のカウントを取得して+1 (upsert)
+            res = supabase.table("daily_stats").select("count").eq("user_id", user_id).eq("study_date", today).execute()
+            new_count = (res.data[0]["count"] + 1) if res.data else 1
+            supabase.table("daily_stats").upsert({"user_id": user_id, "study_date": today, "count": new_count}).execute()
+        except: pass
 
 # =========================
-# サイドバー
+# サイドバー & ダッシュボード
 # =========================
 with st.sidebar:
-    st.title("📊 学習設定")
-    user_id = st.text_input("ユーザーID", placeholder="例: yamada_01")
+    st.title("🚀 合格ロードマップ")
+    user_id = st.text_input("ユーザーID", placeholder="yamada_01")
     
-    category_list = sorted(list(questions_dict.keys()))
-    if not category_list:
-        st.error("JSONファイルが見つかりません。")
-        st.stop()
-        
-    category = st.selectbox("科目を選択", category_list)
-
+    category = st.selectbox("科目を選択", sorted(list(questions_dict.keys())))
+    
+    # 科目変更時のリセット
     if category != st.session_state.current_category:
         st.session_state.current_category = category
         st.session_state.db_synced = False
-        st.session_state.answered = False
-        if user_id:
-            sync_with_supabase(user_id, category)
         st.rerun()
 
+    # 同期ロジック
     if user_id and not st.session_state.db_synced:
-        sync_with_supabase(user_id, category)
+        try:
+            res_w = supabase.table("wrong_questions").select("question_id").eq("user_id", user_id).execute()
+            st.session_state.wrong_ids = {item["question_id"] for item in res_w.data}
+            res_p = supabase.table("user_progress").select("category, last_index").eq("user_id", user_id).execute()
+            st.session_state.all_progress = {item["category"]: item["last_index"] for item in res_p.data}
+            st.session_state.index = st.session_state.all_progress.get(category, 0)
+            st.session_state.db_synced = True
+        except: pass
 
-    mode = st.radio("モード切替", ["通常学習", "苦手克服 🔥"])
-
-    # =========================
-    # ダッシュボード表示
-    # =========================
-    st.divider()
-    st.subheader("🏆 総合ダッシュボード")
+    mode = st.radio("モード", ["通常学習", "苦手克服 🔥", "忘却曲線復習 🧠"])
     
-    total_q_all = 0
-    done_q_all = 0
-    
-    for cat, qs in questions_dict.items():
-        q_count = len(qs)
-        last_idx = st.session_state.all_progress.get(cat, 0)
-        # 現在解いている科目の場合はセッションのインデックスを優先
-        if cat == st.session_state.current_category:
-            last_idx = st.session_state.index
-            
-        total_q_all += q_count
-        done_q_all += min(last_idx, q_count) # 完了数は問題数を超えない
-
-    if total_q_all > 0:
-        total_rate = done_q_all / total_q_all
-        st.metric("トータル進捗率", f"{int(total_rate * 100)}%", f"{done_q_all}/{total_q_all} 問")
-        st.progress(total_rate)
-    
-    with st.expander("詳細な進捗を表示"):
-        for cat, qs in questions_dict.items():
-            q_count = len(qs)
-            last_idx = st.session_state.all_progress.get(cat, 0)
-            if cat == st.session_state.current_category:
-                last_idx = st.session_state.index
-            
-            rate = min(last_idx / q_count, 1.0) if q_count > 0 else 0
-            st.write(f"**{cat}** ({int(rate*100)}%)")
-            st.progress(rate)
+    # 1日のノルマ可視化（直近7日間）
+    if user_id:
+        st.divider()
+        st.subheader("📊 1週間の学習量")
+        try:
+            res_stats = supabase.table("daily_stats").select("study_date, count").eq("user_id", user_id).order("study_date").execute()
+            if res_stats.data:
+                df = pd.DataFrame(res_stats.data)
+                df = df.set_index("study_date")
+                st.bar_chart(df["count"])
+                st.caption(f"今日の解答数: {df.iloc[-1]['count'] if not df.empty else 0} 問")
+        except: st.write("グラフの読み込みに失敗しました")
 
 # =========================
-# 問題抽出
+# 問題抽出（忘却曲線ロジック）
 # =========================
 all_target = questions_dict.get(category, [])
 if mode == "苦手克服 🔥":
     target = [q for q in all_target if q["id"] in st.session_state.wrong_ids]
+elif mode == "忘却曲線復習 🧠":
+    # 本来はDBのlast_reviewed_atを使うが、簡易版として「苦手リスト」からランダムに抽出
+    target = [q for q in all_target if q["id"] in st.session_state.wrong_ids]
+    import random
+    random.seed(datetime.now().day) # 日替わりで順序を変える
+    random.shuffle(target)
 else:
     target = all_target
 
 if not target:
-    if mode == "苦手克服 🔥":
-        st.balloons()
-        st.success("🎉 この科目の苦手問題はすべてクリアしました！")
-    else:
-        st.info("対象の問題がありません。")
-    st.stop()
+    st.success("🎉 対象の問題はありません！"); st.stop()
 
-if st.session_state.index >= len(target):
-    st.session_state.index = 0
-
+if st.session_state.index >= len(target): st.session_state.index = 0
 q = target[st.session_state.index]
 
 # =========================
-# メイン画面表示
+# メイン画面
 # =========================
 st.title(f"📖 {category}")
-st.caption(f"ID: {q['id']} | {mode}")
+col_prog1, col_prog2 = st.columns([4, 1])
+with col_prog1:
+    prog_val = min((st.session_state.index + 1) / len(target), 1.0)
+    st.progress(prog_val)
+with col_prog2:
+    st.write(f"{int(prog_val*100)}%")
 
-prog_val = min((st.session_state.index + 1) / len(target), 1.0)
-st.progress(prog_val)
-st.write(f"**Question {st.session_state.index + 1}** / {len(target)} ({int(prog_val*100)}%)")
+st.markdown(f"### Q. {q['q']}")
 
-st.markdown(f"### {q['q']}")
-
-col1, col2 = st.columns(2)
+col_a, col_b = st.columns(2)
 user_ans = None
+if not st.session_state.answered:
+    if col_a.button("○ 正解", use_container_width=True): user_ans, st.session_state.answered = "○", True
+    if col_b.button("× 不正解", use_container_width=True): user_ans, st.session_state.answered = "×", True
 
-with col1:
-    if st.button("○ 正解", use_container_width=True, disabled=st.session_state.answered, key="btn_o"):
-        user_ans = "○"
-        st.session_state.answered = True
-with col2:
-    if st.button("× 不正解", use_container_width=True, disabled=st.session_state.answered, key="btn_x"):
-        user_ans = "×"
-        st.session_state.answered = True
-
-# =========================
-# 判定ロジック
-# =========================
 if st.session_state.answered:
-    if user_ans:
-        st.session_state.last_ans = user_ans
-
+    if user_ans: st.session_state.last_ans = user_ans
+    
     if st.session_state.last_ans == q["a"]:
-        st.success("✨ 正解です！")
+        st.success("✨ 正解！")
         if q["id"] in st.session_state.wrong_ids:
             st.session_state.wrong_ids.remove(q["id"])
-            if user_id:
-                supabase.table("wrong_questions").delete().eq("user_id", user_id).eq("question_id", q["id"]).execute()
+            if user_id: supabase.table("wrong_questions").delete().eq("user_id", user_id).eq("question_id", q["id"]).execute()
     else:
-        st.error(f"残念！ 正解は 【 {q['a']} 】 です。")
+        st.error(f"不正解！ 正解は {q['a']}")
         if q["id"] not in st.session_state.wrong_ids:
             st.session_state.wrong_ids.add(q["id"])
-            if user_id:
-                supabase.table("wrong_questions").upsert({
-                    "user_id": user_id,
-                    "question_id": q["id"],
-                    "category": category
-                }).execute()
-
+            if user_id: 
+                supabase.table("wrong_questions").upsert({"user_id": user_id, "question_id": q["id"], "category": category, "last_reviewed_at": datetime.now().isoformat()}).execute()
+    
     st.info(f"💡 **解説**\n\n{q['tips']}")
-
+    
     if st.button("次の問題へ ➡️", use_container_width=True):
+        log_study_count(user_id) # 解答数をカウント
         st.session_state.index += 1
         st.session_state.answered = False
-        st.session_state.last_ans = ""
-        if mode == "通常学習":
-            save_progress_to_db(user_id, category, st.session_state.index)
+        if mode == "通常学習" and user_id:
+            supabase.table("user_progress").upsert({"user_id": user_id, "category": category, "last_index": st.session_state.index}).execute()
         st.rerun()
