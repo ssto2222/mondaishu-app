@@ -3,11 +3,11 @@ import json
 import glob
 import os
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, date
 from supabase import create_client
 
 # ページ設定
-st.set_page_config(page_title="社労士合格 Pro v3.1", layout="wide")
+st.set_page_config(page_title="社労士合格 Pro v3.2", layout="wide")
 
 # =========================
 # Supabase接続
@@ -32,8 +32,7 @@ def load_all_questions():
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 questions = json.load(f)
-                if isinstance(questions, list):
-                    all_data[subject_name] = questions
+                if isinstance(questions, list): all_data[subject_name] = questions
         except: pass
     return all_data
 
@@ -42,12 +41,13 @@ questions_dict = load_all_questions()
 # =========================
 # セッション状態の初期化
 # =========================
-keys = {
-    "index": 0, "answered": False, "last_ans": "", "current_category": "",
-    "db_synced": False, "wrong_data": {}, "all_progress": {}
-}
-for key, value in keys.items():
-    if key not in st.session_state: st.session_state[key] = value
+if "index" not in st.session_state: st.session_state.index = 0
+if "answered" not in st.session_state: st.session_state.answered = False
+if "last_result" not in st.session_state: st.session_state.last_result = None # 判定結果保持用
+if "wrong_data" not in st.session_state: st.session_state.wrong_data = {}
+if "current_category" not in st.session_state: st.session_state.current_category = ""
+if "all_progress" not in st.session_state: st.session_state.all_progress = {}
+if "db_synced" not in st.session_state: st.session_state.db_synced = False
 
 # =========================
 # DB操作関数
@@ -55,7 +55,7 @@ for key, value in keys.items():
 def log_study_count(user_id):
     if user_id:
         try:
-            today = datetime.now().date().isoformat()
+            today = date.today().isoformat()
             res = supabase.table("daily_stats").select("count").eq("user_id", user_id).eq("study_date", today).execute()
             new_count = (res.data[0]["count"] + 1) if res.data else 1
             supabase.table("daily_stats").upsert({"user_id": user_id, "study_date": today, "count": new_count}).execute()
@@ -64,10 +64,7 @@ def log_study_count(user_id):
 def sync_user_data(user_id, category):
     try:
         res_w = supabase.table("wrong_questions").select("question_id, miss_count, correct_streak").eq("user_id", user_id).execute()
-        st.session_state.wrong_data = {
-            item["question_id"]: {"miss": item["miss_count"], "streak": item["correct_streak"]} 
-            for item in res_w.data
-        }
+        st.session_state.wrong_data = {item["question_id"]: {"miss": item["miss_count"], "streak": item["correct_streak"]} for item in res_w.data}
         res_p = supabase.table("user_progress").select("category, last_index").eq("user_id", user_id).execute()
         prog_map = {item["category"]: item["last_index"] for item in res_p.data}
         st.session_state.all_progress = prog_map
@@ -80,6 +77,13 @@ def sync_user_data(user_id, category):
 # =========================
 with st.sidebar:
     st.title("🚀 学習管理")
+    
+    # --- 試験日カウントダウン ---
+    exam_date = date(2026, 8, 23)
+    days_left = (exam_date - date.today()).days
+    st.metric("本試験まで", f"あと {days_left} 日")
+    st.divider()
+
     user_id = st.text_input("ユーザーID", placeholder="yamada_01")
     category = st.selectbox("科目を選択", sorted(list(questions_dict.keys())))
 
@@ -87,6 +91,7 @@ with st.sidebar:
         st.session_state.current_category = category
         st.session_state.db_synced = False
         st.session_state.answered = False
+        st.session_state.last_result = None
         if user_id: sync_user_data(user_id, category)
         st.rerun()
 
@@ -97,21 +102,12 @@ with st.sidebar:
     
     if user_id:
         st.divider()
-        st.subheader("📈 週間記録")
         try:
             res_stats = supabase.table("daily_stats").select("study_date, count").eq("user_id", user_id).order("study_date").execute()
             if res_stats.data:
-                df = pd.DataFrame(res_stats.data)
-                df['study_date'] = pd.to_datetime(df['study_date']).dt.date
-                df = df.set_index("study_date")
+                df = pd.DataFrame(res_stats.data).set_index("study_date")
                 st.bar_chart(df["count"])
         except: pass
-
-    st.divider()
-    total_q = sum(len(v) for v in questions_dict.values())
-    done_q = sum(st.session_state.all_progress.values())
-    rate = (done_q / total_q) if total_q > 0 else 0
-    st.metric("トータル進捗", f"{int(rate*100)}%", f"{done_q}/{total_q} 問")
 
 # =========================
 # 問題抽出
@@ -126,57 +122,60 @@ if st.session_state.index >= len(target): st.session_state.index = 0
 q = target[st.session_state.index]
 
 # =========================
-# メイン画面（強調機能付き）
+# メイン画面
 # =========================
 st.title(f"📖 {category}")
 
-# 累計ミス回数による強調
 miss_count = st.session_state.wrong_data.get(q["id"], {}).get("miss", 0)
 streak_count = st.session_state.wrong_data.get(q["id"], {}).get("streak", 0)
 
 if miss_count >= 5:
-    st.error(f"🚨 **【最重要復習】累計ミス {miss_count}回！** この問題は徹底的に理解してください。")
-    # 背景を赤っぽく見せるためのコンテナ
+    st.error(f"🚨 **【最重要復習】累計ミス {miss_count}回！**")
     st.markdown("""<div style="background-color: #ffebee; padding: 20px; border-radius: 10px; border-left: 5px solid #ff1744;">""", unsafe_allow_html=True)
 elif miss_count >= 1:
     st.warning(f"⚠️ 累計ミス {miss_count}回 / 連続正解 {streak_count}回")
 
-# 問題文表示
 st.markdown(f"### Q{st.session_state.index + 1}. {q['q']}")
-if miss_count >= 5:
-    st.markdown("</div>", unsafe_allow_html=True)
+if miss_count >= 5: st.markdown("</div>", unsafe_allow_html=True)
 
 st.divider()
 
-# 回答ボタン
+# --- 判定処理 ---
 col1, col2 = st.columns(2)
-user_ans = None
+user_choice = None
+
 if not st.session_state.answered:
-    if col1.button("○ 正解", use_container_width=True): user_ans, st.session_state.answered = "○", True
-    if col2.button("× 不正解", use_container_width=True): user_ans, st.session_state.answered = "×", True
+    if col1.button("○ 正解", use_container_width=True): user_choice = "○"
+    if col2.button("× 不正解", use_container_width=True): user_choice = "×"
 
-# 判定
-if st.session_state.answered:
-    correct = (user_ans == q["a"]) if user_ans else (st.session_state.last_ans == q["a"])
-    
-    if user_id:
-        curr = st.session_state.wrong_data.get(q["id"], {"miss": 0, "streak": 0})
-        if correct:
-            st.success("✨ 正解！")
-            new_streak = curr["streak"] + 1
-            if new_streak >= 3:
-                supabase.table("wrong_questions").delete().eq("user_id", user_id).eq("question_id", q["id"]).execute()
-                if q["id"] in st.session_state.wrong_data: del st.session_state.wrong_data[q["id"]]
-                st.balloons()
+    if user_choice:
+        st.session_state.answered = True
+        is_correct = (user_choice == q["a"])
+        st.session_state.last_result = is_correct # 結果をセッションに固定
+        
+        if user_id:
+            curr = st.session_state.wrong_data.get(q["id"], {"miss": 0, "streak": 0})
+            if is_correct:
+                new_streak = curr["streak"] + 1
+                if new_streak >= 3:
+                    supabase.table("wrong_questions").delete().eq("user_id", user_id).eq("question_id", q["id"]).execute()
+                    if q["id"] in st.session_state.wrong_data: del st.session_state.wrong_data[q["id"]]
+                else:
+                    supabase.table("wrong_questions").upsert({"user_id": user_id, "question_id": q["id"], "category": category, "miss_count": curr["miss"], "correct_streak": new_streak}).execute()
+                    st.session_state.wrong_data[q["id"]] = {"miss": curr["miss"], "streak": new_streak}
             else:
-                supabase.table("wrong_questions").upsert({"user_id": user_id, "question_id": q["id"], "category": category, "miss_count": curr["miss"], "correct_streak": new_streak}).execute()
-                st.session_state.wrong_data[q["id"]] = {"miss": curr["miss"], "streak": new_streak}
-        else:
-            st.error(f"残念！ 正解は 【 {q['a']} 】")
-            new_miss = curr["miss"] + 1
-            supabase.table("wrong_questions").upsert({"user_id": user_id, "question_id": q["id"], "category": category, "miss_count": new_miss, "correct_streak": 0}).execute()
-            st.session_state.wrong_data[q["id"]] = {"miss": new_miss, "streak": 0}
+                new_miss = curr["miss"] + 1
+                supabase.table("wrong_questions").upsert({"user_id": user_id, "question_id": q["id"], "category": category, "miss_count": new_miss, "correct_streak": 0}).execute()
+                st.session_state.wrong_data[q["id"]] = {"miss": new_miss, "streak": 0}
+        st.rerun()
 
+# --- 判定結果の表示（再描画されても維持される） ---
+if st.session_state.answered:
+    if st.session_state.last_result:
+        st.success("✨ 正解です！")
+    else:
+        st.error(f"残念！ 正解は 【 {q['a']} 】")
+    
     st.info(f"💡 **解説**\n\n{q['tips']}")
 
     if st.button("次の問題へ ➡️", use_container_width=True):
@@ -184,6 +183,9 @@ if st.session_state.answered:
             log_study_count(user_id)
             if mode == "通常学習":
                 supabase.table("user_progress").upsert({"user_id": user_id, "category": category, "last_index": st.session_state.index + 1}).execute()
+        
+        # 状態をリセットして次へ
         st.session_state.index += 1
         st.session_state.answered = False
+        st.session_state.last_result = None
         st.rerun()
