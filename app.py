@@ -1,9 +1,16 @@
+from openai import OpenAI
+
 import streamlit as st
 from supabase import create_client
 import openai
 import random
 from collections import Counter
 import json
+
+
+client = OpenAI(
+    api_key=st.secrets["OPENAI_API_KEY"]
+)
 
 st.set_page_config(page_title="社労士AI学習")
 
@@ -61,9 +68,11 @@ JSON形式
 ]
 """
 
-    res=openai.ChatCompletion.create(
+    res = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[{"role":"user","content":prompt}]
+        messages=[
+            {"role":"user","content":prompt}
+        ]
     )
 
     data=json.loads(res.choices[0].message.content)
