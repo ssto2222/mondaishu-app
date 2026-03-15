@@ -24,12 +24,21 @@ openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 def load_questions(category):
 
-    res = supabase.table("questions")\
-        .select("*")\
-        .eq("category", category)\
-        .execute()
+    try:
 
-    return res.data
+        res = supabase.table("questions") \
+            .select("*") \
+            .eq("category", category) \
+            .execute()
+
+        return res.data
+
+    except Exception as e:
+
+        st.error("Supabaseエラー")
+        st.code(str(e))
+
+        return []
 
 
 # =============================
