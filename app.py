@@ -57,21 +57,28 @@ if "db_synced" not in st.session_state:
 # DB同期関数 (苦手リスト + 進捗再開)
 # =========================
 def sync_with_supabase(user_id, category):
-    """DBから苦手問題と最後に解いた位置を復元する"""
+    """DBからデータを取得。データがなくてもエラーにせず正常終了させる"""
     if user_id and not st.session_state.db_synced:
         try:
             # 1. 苦手問題の同期
             res_wrong = supabase.table("wrong_questions").select("question_id").eq("user_id", user_id).execute()
+            # データが空でも res_wrong.data は [] を返すので安全
             st.session_state.wrong_ids = {item["question_id"] for item in res_wrong.data}
             
             # 2. 進捗（インデックス）の同期
             res_prog = supabase.table("user_progress").select("last_index").eq("user_id", user_id).eq("category", category).execute()
-            if res_prog.data:
+            
+            # 初回接続時（データがない時）は 0 のままにする
+            if res_prog.data and len(res_prog.data) > 0:
                 st.session_state.index = res_prog.data[0]["last_index"]
+            else:
+                st.session_state.index = 0
             
             st.session_state.db_synced = True
         except Exception as e:
-            st.warning(f"データ同期に失敗しました。オフラインで続行します。")
+            # エラーの詳細を表示（本番では st.log などに流すのが理想）
+            st.error(f"同期エラー詳細: {e}") 
+            st.warning("初回設定またはネットワークエラーです。このまま学習を始められます。")
 
 def save_progress_to_db(user_id, category, index):
     """現在の進捗をDBに保存する"""
