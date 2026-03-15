@@ -9,7 +9,6 @@ st.set_page_config(page_title="社労士合格アプリ", layout="centered")
 # =========================
 # Supabase接続
 # =========================
-# secrets.toml または Streamlit Cloud の Secrets 設定が必要
 try:
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
@@ -19,7 +18,7 @@ except Exception as e:
     st.stop()
 
 # =========================
-# 問題読み込み (JSONファイルを検索)
+# 問題読み込み
 # =========================
 @st.cache_data
 def load_all_questions():
@@ -46,7 +45,7 @@ if "index" not in st.session_state:
 if "answered" not in st.session_state:
     st.session_state.answered = False
 if "wrong_ids" not in st.session_state:
-    st.session_state.wrong_ids = set() # IDのみを保持
+    st.session_state.wrong_ids = set()
 if "current_category" not in st.session_state:
     st.session_state.current_category = ""
 if "last_ans" not in st.session_state:
@@ -55,18 +54,36 @@ if "db_synced" not in st.session_state:
     st.session_state.db_synced = False
 
 # =========================
-# DB同期関数 (永続化のキモ)
+# DB同期関数 (苦手リスト + 進捗再開)
 # =========================
-def sync_with_supabase(user_id):
-    """DBからユーザーの苦手問題IDを取得してセッションに復元する"""
+def sync_with_supabase(user_id, category):
+    """DBから苦手問題と最後に解いた位置を復元する"""
     if user_id and not st.session_state.db_synced:
         try:
-            response = supabase.table("wrong_questions").select("question_id").eq("user_id", user_id).execute()
-            ids = {item["question_id"] for item in response.data}
-            st.session_state.wrong_ids = ids
+            # 1. 苦手問題の同期
+            res_wrong = supabase.table("wrong_questions").select("question_id").eq("user_id", user_id).execute()
+            st.session_state.wrong_ids = {item["question_id"] for item in res_wrong.data}
+            
+            # 2. 進捗（インデックス）の同期
+            res_prog = supabase.table("user_progress").select("last_index").eq("user_id", user_id).eq("category", category).execute()
+            if res_prog.data:
+                st.session_state.index = res_prog.data[0]["last_index"]
+            
             st.session_state.db_synced = True
         except Exception as e:
             st.warning(f"データ同期に失敗しました。オフラインで続行します。")
+
+def save_progress_to_db(user_id, category, index):
+    """現在の進捗をDBに保存する"""
+    if user_id:
+        try:
+            supabase.table("user_progress").upsert({
+                "user_id": user_id,
+                "category": category,
+                "last_index": index
+            }).execute()
+        except:
+            pass
 
 # =========================
 # サイドバー
@@ -75,10 +92,6 @@ with st.sidebar:
     st.title("📊 学習設定")
     user_id = st.text_input("ユーザーID (保存に必要)", placeholder="例: yamada_01")
     
-    if user_id:
-        sync_with_supabase(user_id)
-        st.success(f"同期完了: 苦手問題 {len(st.session_state.wrong_ids)}件")
-
     category_list = sorted(list(questions_dict.keys()))
     if not category_list:
         st.error("JSONファイルが見つかりません。")
@@ -86,13 +99,23 @@ with st.sidebar:
         
     category = st.selectbox("科目を選択", category_list)
 
+    # 科目が変わったら同期フラグをリセット
     if category != st.session_state.current_category:
         st.session_state.current_category = category
+        st.session_state.db_synced = False # 新しい科目で同期し直す
         st.session_state.index = 0
         st.session_state.answered = False
+        if user_id:
+            sync_with_supabase(user_id, category)
         st.rerun()
 
+    if user_id and not st.session_state.db_synced:
+        sync_with_supabase(user_id, category)
+
     mode = st.radio("モード切替", ["通常学習", "苦手克服 🔥"])
+    
+    if user_id:
+        st.success(f"同期中: {user_id}")
 
 # =========================
 # 問題抽出
@@ -104,9 +127,14 @@ else:
     target = all_target
 
 if not target:
-    st.info("対象の問題がありません。まずは通常モードで学習しましょう！")
+    if mode == "苦手克服 🔥":
+        st.balloons()
+        st.success("🎉 この科目の苦手問題はすべてクリアしました！")
+    else:
+        st.info("対象の問題がありません。")
     st.stop()
 
+# インデックスが範囲外にならないよう調整（苦手克服で問題が減った時用）
 if st.session_state.index >= len(target):
     st.session_state.index = 0
 
@@ -118,7 +146,7 @@ q = target[st.session_state.index]
 st.title(f"📖 {category}")
 st.caption(f"ID: {q['id']} | {mode}")
 st.progress(min((st.session_state.index + 1) / len(target), 1.0))
-st.write(f"**Q{st.session_state.index + 1}.**")
+st.write(f"**Q{st.session_state.index + 1} / {len(target)}**")
 st.markdown(f"### {q['q']}")
 
 col1, col2 = st.columns(2)
@@ -142,19 +170,15 @@ if st.session_state.answered:
 
     if st.session_state.last_ans == q["a"]:
         st.success("✨ 正解です！")
-        # 苦手リストから削除
         if q["id"] in st.session_state.wrong_ids:
             st.session_state.wrong_ids.remove(q["id"])
             if user_id:
-                # DBからも削除（永続化）
                 supabase.table("wrong_questions").delete().eq("user_id", user_id).eq("question_id", q["id"]).execute()
     else:
         st.error(f"残念！ 正解は 【 {q['a']} 】 です。")
-        # 苦手リストに追加
         if q["id"] not in st.session_state.wrong_ids:
             st.session_state.wrong_ids.add(q["id"])
             if user_id:
-                # DBへ保存（永続化：重複無視はDB側またはロジックで制御）
                 supabase.table("wrong_questions").upsert({
                     "user_id": user_id,
                     "question_id": q["id"],
@@ -167,6 +191,9 @@ if st.session_state.answered:
         st.session_state.index += 1
         st.session_state.answered = False
         st.session_state.last_ans = ""
+        # 進捗をDBに保存
+        if mode == "通常学習": # 苦手モードは件数が変動するため通常時のみ記録
+            save_progress_to_db(user_id, category, st.session_state.index)
         st.rerun()
 
 # =========================
