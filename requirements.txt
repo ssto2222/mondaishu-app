@@ -1,5 +1,2 @@
 streamlit
-st-supabase-connection
 supabase
-realtime
-postgrest
